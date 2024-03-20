@@ -1,3 +1,13 @@
+#############################
+# 场景: 运营AI助手
+# 技术要点: function-call(1106)
+# 流程: 
+# 1. 注册业务函数
+# 2. 用户提问
+# 3. AI助手根据上下文, 调用相应业务函数
+# 4. 函数执行, 返回结果
+# 5. AI助手根据函数返回内容综合回复用户
+#############################
 from datetime import date, datetime
 import json
 import os
@@ -13,15 +23,13 @@ from env import ModelAccessInfo
 
 log=logging.getLogger(__name__)
 
-os.environ["HTTPS_PROXY"] = "http://127.0.0.1:1087"
-
-modelAccessInfo=ModelAccessInfo.find_model_access_info("gpt-4", model_version='1106-Preview')[0]
-# modelAccessInfo=ModelAccessInfo.find_model_access_info("gpt-35-turbo", model_version='1106')[0]
+# modelAccessInfo=ModelAccessInfo.find_model_access_info("gpt-4", model_version='1106-Preview')[0]
+modelAccessInfo=ModelAccessInfo.find_model_access_info("gpt-35-turbo", model_version='1106')[0]
 
 client = AzureOpenAI(
   azure_endpoint = modelAccessInfo.endpoint,
   api_key=modelAccessInfo.api_key,  
-  api_version='2023-12-01-preview',#"2024-02-15-preview"
+  api_version="2024-02-15-preview"#'2023-12-01-preview'
 )
 
 # 目前支持的模型及版本

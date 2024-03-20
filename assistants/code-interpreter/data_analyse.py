@@ -1,3 +1,12 @@
+#############################
+# 场景: 数据分析助手
+# 技术要点: Assistant-API的'代码解释器'功能
+# 流程: 
+# 1. 配置助手使用'代码解释器'功能
+# 2. 上传需要分析的股票csv数据文件
+# 3. 用户提问, 要求进行多维度分析
+# 4. 助手执行分析, 根据用户要求生成相关代码, 用沙箱环境执行, 综合执行结果内容进行回复
+#############################
 import os
 import logging
 import time
@@ -6,6 +15,7 @@ from openai import AzureOpenAI, AsyncAzureOpenAI
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.beta.thread import Thread
 from openai.types.beta.threads import Run, ThreadMessage
+from openai.types.beta.threads.runs import RunStep
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -31,6 +41,18 @@ def downloadFileIfNotExists(client:AzureOpenAI, file_id:str, outputFp:str, fileT
   if not os.path.exists(outputFp):
     downloadFile(client, file_id, outputFp)
   return outputFp
+
+
+__MSG_MAP__={}
+def getMsgById(client:AzureOpenAI, threadId:str, msgId:str):
+  k=f'{threadId}_{msgId}'
+  msg=__MSG_MAP__.get(k)
+  if msg:
+    return msg
+  
+  msg=client.beta.threads.messages.retrieve(msgId,thread_id=threadId)
+  __MSG_MAP__[k]=msg
+  return msg
 
 def appendMsgAndRun(client:AzureOpenAI, thread:Thread, msgContent:str, fileIds:List[str]=None):
   # 添加提问到会话 并 执行回复
@@ -63,8 +85,9 @@ def waitForRunComplete(client:AzureOpenAI, thread:Thread, run:Run):
 
   stepPage=client.beta.threads.runs.steps.list(run_id=run.id, thread_id=thread.id, limit=100, order='asc')
   for stepNo,step in enumerate(stepPage):
-    log.info(f'步骤{stepNo+1}: {step.status}')
-    log.debug(step.json(indent=2,ensure_ascii=False))
+    log.info(f'********步骤{stepNo+1}: {step.status}********')
+    # log.debug(step.json(indent=2,ensure_ascii=False))
+    dispRunStep(client,thread, step)
 
   # Wait till the assistant has responded
   while status not in ["completed", "cancelled", "expired", "failed"]:
@@ -74,13 +97,15 @@ def waitForRunComplete(client:AzureOpenAI, thread:Thread, run:Run):
     status = run.status
     
     stepPage=client.beta.threads.runs.steps.list(run_id=run.id, thread_id=thread.id, limit=100, order='asc')
-    for step in stepPage:
-      log.debug(step.json(indent=2,ensure_ascii=False))
+    for stepNo,step in enumerate(stepPage):
+      log.info(f'步骤{stepNo+1}: {step.status}')
+      # log.debug(step.json(indent=2,ensure_ascii=False))
+      dispRunStep(client, thread, step)
 
   log.info(f'助手回复完成: {status}')
 
 def dispMsg(client:AzureOpenAI, msg:ThreadMessage):
-  log.info(f'[{msg.role}]消息: {msg.id} {msg.file_ids}')
+  log.info(f'--------[{msg.role}]消息: {msg.id} {msg.file_ids}')
   if msg.file_ids and msg.role!='user':
     for fileId in msg.file_ids:
       log.info(f'下载文件: {fileId}')
@@ -95,18 +120,47 @@ def dispMsg(client:AzureOpenAI, msg:ThreadMessage):
       log.info(f'图片路径: {fp}')
     else:
       log.info(f'其他内容: {content.json(indent=2,ensure_ascii=False)}')
+  log.info(f'----------------')
 
+def dispRunStep(client:AzureOpenAI, thread:Thread, runStep:RunStep):
+  log.info(f'--------步骤: {runStep.id} {runStep.status} {runStep.step_details.type}')
+  if runStep.step_details.type == "tool_calls":
+    for toolCall in runStep.step_details.tool_calls:
+      if toolCall.type == "code_interpreter":
+        log.info(f'执行代码: \n{toolCall.code_interpreter.input}')
+        log.info(f'执行输出:')
+        if toolCall.code_interpreter.outputs:
+          for output in toolCall.code_interpreter.outputs:
+            if output.type=='logs':
+              log.info(f'日志输出: \n{output.logs}')
+            elif output.type=='image':
+              log.info(f'图片输出: {output.image.file_id}')
+            else:
+              log.info(f'未知输出: {output}')
+      else:
+        log.info(f'其他工具调用: {toolCall.type}')
+  elif runStep.step_details.type == "message_creation":
+    if runStep.status != "completed":
+      log.info('执行消息生成中...')
+    else:
+      log.info('执行消息生成完成')
+      stepMsg=getMsgById(client, thread.id, runStep.step_details.message_creation.message_id)
+      dispMsg(client, stepMsg)
+  else:
+    log.info(f'其他类型步骤: {runStep.step_details.type}')
+    log.info(runStep.step_details)
+  log.info(f'----------------')
+    
 
-
-
-modelAccessInfo=ModelAccessInfo.find_model_access_info("gpt-4", model_version='1106-Preview')[0]
-# modelAccessInfo=ModelAccessInfo.find_model_access_info("gpt-35-turbo", model_version='1106')[0]
+modelAccessInfo=ModelAccessInfo.find_model_access_info("gpt-4", model_version='1106-Preview',region='australiaeast')[0]
+# modelAccessInfo=ModelAccessInfo.find_model_access_info("gpt-35-turbo", model_version='1106',region='australiaeast')[0]
 
 client = AzureOpenAI(
   azure_endpoint = modelAccessInfo.endpoint,
   api_key=modelAccessInfo.api_key,  
-  api_version="2024-02-15-preview",
+  api_version="2024-02-15-preview",#"2024-02-01",
 )
+
 # # 上传文件
 # stockFile = client.files.create(
 #   file=open("stock.csv", "rb"),
@@ -141,16 +195,16 @@ log.debug(thread.json(indent=2,ensure_ascii=False))
 log.info(f'会话: {thread.id}')
 
 # #添加提问到会话
-run = appendMsgAndRun(client, thread, f'''csv文件是上周A股云计算行业的涨跌幅数据。请从多维度进行详细的分析, 哪些个股有哪些突出的表现, 并生成一份Markdown报告。
+run = appendMsgAndRun(client, thread, f'''csv文件是上周A股云计算行业的涨跌幅数据。请从多维度进行详细的分析, 包含哪些个股有哪些突出的表现。
 
 绘制图表时, 按以下步骤应用中文字体:
 1. 将我上传的zip文件(/mnt/data/{fontFile.id})解压后保存到 /mnt/data/fonts/msyh.ttc
-2. 所有涉及文字的图表元素中, 都要指定使用msyh.ttc字体
+2. 设置我上传的字体为全局字体
 
-使用指定字体绘图的示例代码如下:
+全局设定自定义字体示例代码如下:
 
 import matplotlib.pyplot as plt
-from matplotlib.font_manager import FontProperties
+from matplotlib import font_manager
 import os
 import zipfile
 
@@ -158,24 +212,15 @@ import zipfile
 zip_path = '/mnt/data/{fontFile.id}'
 extract_path = '/mnt/data/fonts'
 
-# 创建字体目录
 if not os.path.exists(extract_path):
     os.makedirs(extract_path)
 
-# 解压操作
 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
     zip_ref.extractall(extract_path)
 
 # 2. 全局设置使用中文字体
-my_font= FontProperties(fname="/mnt/data/fonts/msyh.ttc")
 font_manager.fontManager.addfont("/mnt/data/fonts/msyh.ttc")
-plt.rcParams['font.family']=[my_font.get_name()]
-
-fig,ax= plt.subplots()
-ax.plot([1,2,3,4,5],[2,3,3,2,1])
-ax.set_title('简单的折线图')
-ax.set_xlabel('x轴')
-ax.set_ylabel('y轴')
+plt.rcParams['font.family']=['Microsoft YaHei']
 ''', [stockFile.id,fontFile.id])
 # 获取执行信息
 # run =  client.beta.threads.runs.retrieve('run_46yIQDNZwbjWucEyx47YM26D', thread_id=thread.id)
@@ -190,8 +235,9 @@ while True:
     order="asc",
   )
 
-  log.debug(messages.json(indent=2,ensure_ascii=False))
-  for msg in messages:
+  # log.debug(messages.json(indent=2,ensure_ascii=False))
+  for msgNo,msg in enumerate(messages):
+    log.info(f'********消息{msgNo+1}********')
     dispMsg(client, msg)
         
   newMsgContent=input('请继续提问: ')
@@ -199,3 +245,4 @@ while True:
     break
   
   run = appendMsgAndRun(client, thread, newMsgContent)
+  
